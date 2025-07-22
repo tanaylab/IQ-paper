@@ -1,0 +1,3 @@
+genome:  
+  mm10: data/mm10
+  hg38: data/hg38  

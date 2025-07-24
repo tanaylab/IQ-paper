@@ -2,3 +2,6 @@ raw-stuff/
 data/
 output/
 analysis/Rplot001.*
+*.tar.gz
+exclude-list.txt
+paper.txt

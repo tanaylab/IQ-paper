@@ -5,3 +5,7 @@ analysis/Rplot001.*
 *.tar.gz
 exclude-list.txt
 paper.txt
+source_data/
+upload_iq_paper_data.sh
+GEO_submission/
+analysis/*.R

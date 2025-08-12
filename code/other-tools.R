@@ -12,7 +12,7 @@ compare_models_multiple <- function(data, models,
                                     p_adjust_method = "BH",
                                     test_method = "wilcox",
                                     show_exact_pval = TRUE,
-                                    subtitle = NULL, 
+                                     subtitle = NULL, 
                                     show_connected_lines = TRUE,
                                     linetype = "solid",
                                     line_color = "black",
@@ -22,7 +22,8 @@ compare_models_multiple <- function(data, models,
                                     show_signif = TRUE,
                                     test_all_pairs = FALSE,
                                     explicit_comparisons = NULL, 
-                                    return_pairwise_results = FALSE) { 
+                                     return_pairwise_results = FALSE,
+                                     conf_level = 0.95) { 
     # Validate input models
     if (!all(models %in% unique(data$model))) {
         missing_models <- models[!models %in% unique(data$model)]
@@ -204,24 +205,65 @@ compare_models_multiple <- function(data, models,
         # Perform selected statistical test
         if (test_method == "wilcox") {
             # Wilcoxon signed-rank test (non-parametric, suitable for R² values)
-            test_result <- wilcox.test(x_valid, y_valid, paired = TRUE, exact = FALSE)
+            test_result <- wilcox.test(x_valid, y_valid, paired = TRUE, exact = FALSE, conf.int = TRUE, conf.level = conf_level)
             p_value <- test_result$p.value
             test_name <- "Wilcoxon signed-rank test"
+            statistic_name <- names(test_result$statistic)
+            statistic_value <- as.numeric(test_result$statistic)
+            # Approximate z from two-sided p-value; sign by median difference
+            median_diff <- stats::median(y_valid - x_valid, na.rm = TRUE)
+            z_value <- stats::qnorm(p_value / 2, lower.tail = FALSE)
+            z_value <- z_value * sign(median_diff)
+            effect_size_r <- z_value / sqrt(length(x_valid))
+            estimate <- if (!is.null(test_result$estimate)) as.numeric(test_result$estimate) else NA_real_
+            conf_int_low <- if (!is.null(test_result$conf.int)) as.numeric(test_result$conf.int[1]) else NA_real_
+            conf_int_high <- if (!is.null(test_result$conf.int)) as.numeric(test_result$conf.int[2]) else NA_real_
+            degrees_freedom <- NA_real_
         } else if (test_method == "t.test") {
             # Paired t-test (parametric)
-            test_result <- t.test(x_valid, y_valid, paired = TRUE)
+            test_result <- t.test(x_valid, y_valid, paired = TRUE, conf.level = conf_level)
             p_value <- test_result$p.value
             test_name <- "Paired t-test"
+            statistic_name <- names(test_result$statistic)
+            statistic_value <- as.numeric(test_result$statistic)
+            degrees_freedom <- as.numeric(test_result$parameter)
+            # Cohen's dz for paired samples
+            diffs <- y_valid - x_valid
+            effect_size_r <- NA_real_
+            # Convert t to r as an effect size alternative: r = t / sqrt(t^2 + df)
+            r_from_t <- statistic_value / sqrt(statistic_value^2 + degrees_freedom)
+            # Keep both; store r_from_t in effect_size_r
+            effect_size_r <- r_from_t
+            estimate <- if (!is.null(test_result$estimate)) as.numeric(test_result$estimate) else mean(diffs, na.rm = TRUE)
+            conf_int_low <- if (!is.null(test_result$conf.int)) as.numeric(test_result$conf.int[1]) else NA_real_
+            conf_int_high <- if (!is.null(test_result$conf.int)) as.numeric(test_result$conf.int[2]) else NA_real_
+            z_value <- NA_real_
         } else if (test_method == "permutation") {
             # Permutation test (robust, distribution-free)
             test_result <- perform_permutation_test(x_valid, y_valid)
             p_value <- test_result$p_value
             test_name <- "Permutation test"
+            statistic_name <- "mean_diff"
+            statistic_value <- as.numeric(test_result$observed_diff)
+            degrees_freedom <- NA_real_
+            estimate <- statistic_value
+            conf_int_low <- NA_real_
+            conf_int_high <- NA_real_
+            z_value <- NA_real_
+            effect_size_r <- NA_real_
         } else if (test_method == "bootstrap") {
             # Bootstrap test (robust confidence intervals)
             test_result <- perform_bootstrap_test(x_valid, y_valid)
             p_value <- test_result$p_value
             test_name <- "Bootstrap test"
+            statistic_name <- "mean_diff"
+            statistic_value <- as.numeric(test_result$observed_diff)
+            degrees_freedom <- NA_real_
+            estimate <- statistic_value
+            conf_int_low <- as.numeric(test_result$ci_lower)
+            conf_int_high <- as.numeric(test_result$ci_upper)
+            z_value <- NA_real_
+            effect_size_r <- NA_real_
         }
 
         # Store results
@@ -231,7 +273,17 @@ compare_models_multiple <- function(data, models,
             p_value = p_value,
             position_a = pos_a,
             position_b = pos_b,
-            n_samples = length(x_valid)
+            n_samples = length(x_valid),
+            test_name = test_name,
+            statistic_name = statistic_name,
+            statistic_value = statistic_value,
+            degrees_freedom = degrees_freedom,
+            z_value = z_value,
+            effect_size_r = effect_size_r,
+            estimate = estimate,
+            conf_int_low = conf_int_low,
+            conf_int_high = conf_int_high,
+            conf_level = conf_level
         )
         
         pair_counter <- pair_counter + 1
@@ -267,8 +319,61 @@ compare_models_multiple <- function(data, models,
     }
 
     if (return_pairwise_results) {
-        p_res <- purrr::imap_dfr(pairwise_results, ~ tibble(model = .y, signif = .x$is_significant, pval = .x$adjusted_p_value)) %>%
-            separate(model, into = c("model_a", "model_b"), sep = "_vs_")
+        # Build a rich results data frame including statistic, df (or n), p-values, effect size, and CIs
+        p_res <- purrr::imap_dfr(
+            pairwise_results,
+            ~ {
+                model_key <- .y
+                res <- .x
+                # Degrees of freedom for reporting: for t-test it's df; for Wilcoxon we use n-1 by convention, though Wilcoxon has no df.
+                df_report <- if (!is.na(res$degrees_freedom)) {
+                    res$degrees_freedom
+                } else if (!is.na(res$n_samples)) {
+                    max(res$n_samples - 1, 1)
+                } else {
+                    NA_real_
+                }
+                effect_label <- if (grepl("Wilcoxon|t-test", res$test_name)) "r" else "r"
+                ci_percent <- round(res$conf_level * 100)
+                # Format numbers
+                fmt <- function(x) ifelse(is.na(x), NA_character_, formatC(x, digits = 3, format = "f"))
+                stat_label <- ifelse(is.null(res$statistic_name), "stat", res$statistic_name)
+                # Build APA-like string with df value (for non-parametric tests, df is reported as n-1 by convention)
+                apa <- paste0(
+                    stat_label, "(", ifelse(is.na(df_report), "NA", fmt(df_report)), ") = ", fmt(res$statistic_value),
+                    ", p = ", fmt(res$p_value),
+                    ", ", effect_label, " = ", fmt(res$effect_size_r),
+                    ", ", ci_percent, "% Confidence Intervals = [", fmt(res$conf_int_low), ", ", fmt(res$conf_int_high), "]"
+                )
+                # Strict APA-like string using adjusted p-value as the primary p if multiple comparisons are present
+                apa_strict <- paste0(
+                    stat_label, "(", ifelse(is.na(df_report), "NA", fmt(df_report)), ") = ", fmt(res$statistic_value),
+                    ", p = ", fmt(res$adjusted_p_value),
+                    ", ", effect_label, " = ", fmt(res$effect_size_r),
+                    ", ", ci_percent, "% Confidence Intervals = [", fmt(res$conf_int_low), ", ", fmt(res$conf_int_high), "]"
+                )
+                tibble(
+                    model = model_key,
+                    model_a = sub("_vs_.*$", "", model_key),
+                    model_b = sub("^.*_vs_", "", model_key),
+                    test_name = res$test_name,
+                    statistic_name = stat_label,
+                    statistic_value = res$statistic_value,
+                    degrees_of_freedom = df_report,
+                    n_samples = res$n_samples,
+                    p_value = res$p_value,
+                    adjusted_p_value = res$adjusted_p_value,
+                    significance = res$significance,
+                    is_significant = res$is_significant,
+                    effect_size_r = res$effect_size_r,
+                    conf_level = res$conf_level,
+                    conf_int_low = res$conf_int_low,
+                    conf_int_high = res$conf_int_high,
+                    apa_report = apa,
+                    apa_report_strict = apa_strict
+                )
+            }
+        )
 
         return(p_res)
     }

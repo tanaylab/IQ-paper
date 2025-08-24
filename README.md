@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/1017382196.svg)](https://doi.org/10.5281/zenodo.16936493)
+
 # IceQream (IQ) paper companion repository
 
 Welcome to the companion repository for the **“IceQream: Quantitative chromosome accessibility analysis using physical TF models”** manuscript. 
